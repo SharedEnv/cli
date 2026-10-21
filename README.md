@@ -3,7 +3,7 @@
 **The zero-knowledge secrets vault for teams, in your terminal.**
 
 [![npm](https://img.shields.io/npm/v/@sharedenv/cli)](https://www.npmjs.com/package/@sharedenv/cli)
-[![license](https://img.shields.io/npm/l/@sharedenv/cli)](LICENSE)
+[![license](https://img.shields.io/github/license/SharedEnv/cli)](LICENSE)
 
 Your `.env` files have no business in Slack, in an email or in a git repo. With
 [sharedenv](https://sharedenv.com), your team keeps its environment variables, API keys and
