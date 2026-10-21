@@ -1,0 +1,62 @@
+# Publishes @sharedenv/cli to npm when a version tag (vX.Y.Z) is pushed.
+#
+# No npm token anywhere: npm trusts this exact workflow through OIDC (a Trusted Publisher,
+# configured once on npmjs.com), and the package carries a provenance statement that links
+# the tarball to the commit it was built from. Actions are pinned to commit SHAs.
+
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC: npm trusted publishing and provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # a poisoned cache could reach the OIDC token
+
+      - name: The tag is the package version
+        run: test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
+
+      - name: npm can publish through OIDC (11.5.1 or later)
+        run: |
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
+              console.error(`npm ${process.argv[1]} cannot use trusted publishing`);
+              process.exit(1);
+            }' "$(npm --version)"
+
+      - name: Already on npm?
+        id: published
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if npm view "@sharedenv/cli@$version" version >/dev/null 2>&1; then
+            echo "@sharedenv/cli@$version is already published: nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test
+        if: steps.published.outputs.skip != 'true'
+        run: |
+          npm install --no-package-lock --ignore-scripts --no-audit --no-fund
+          node bin/sharedenv.js --version
+          node bin/sharedenv.js help > /dev/null
+          npm pack --dry-run
+
+      - name: Publish
+        if: steps.published.outputs.skip != 'true'
+        run: npm publish --access public --provenance --ignore-scripts

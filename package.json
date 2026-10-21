@@ -1,0 +1,39 @@
+{
+  "name": "@sharedenv/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "sharedenv CLI — pull and run with your zero-knowledge secrets, decrypted locally.",
+  "license": "Apache-2.0",
+  "keywords": [
+    "secrets",
+    "env",
+    "dotenv",
+    "zero-knowledge",
+    "e2ee",
+    "cli"
+  ],
+  "homepage": "https://sharedenv.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SharedEnv/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SharedEnv/cli/issues"
+  },
+  "bin": {
+    "sharedenv": "./bin/sharedenv.js"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ]
+}
