@@ -64,15 +64,112 @@ is passed through, so scripts and CI behave exactly as without sharedenv.
 A variable your shell already sets wins over the vault, so a local `DATABASE_URL` is never
 replaced behind your back: add `--override-env` when you want the vault's value.
 
-### Write a .env file
+### Get your secrets as a file, or as JSON
 
 ```bash
-sharedenv pull prod --out .env       # a file only you can read
-sharedenv pull prod --format json    # for scripts and tools
+sharedenv pull prod                    # dotenv, on stdout
+sharedenv pull prod --out .env         # the same, in a file only you can read
+sharedenv pull prod --format json      # JSON, for scripts and programs
 ```
 
-The file works with dotenv-style libraries and can be sourced by a shell
-(`set -a; . ./.env; set +a`): every value is quoted so that nothing in it gets executed.
+stdout carries the secrets and nothing else (questions and messages go to stderr), so
+pipes and redirections get clean data. From a script or a program there is no terminal to
+ask for your master password: set `SHAREDENV_PASSWORD`.
+
+#### dotenv (the default)
+
+For a vault holding five secrets, `sharedenv pull prod` prints:
+
+```dotenv
+APP_NAME='Acme billing'
+DATABASE_URL=postgres://app:s3cret@db.internal:5432/app
+JWT_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASC
+-----END PRIVATE KEY-----'
+SMTP_PASSWORD="it's a pass"
+STRIPE_KEY=sk_test_example
+```
+
+- One `NAME=value` per secret, sorted by name, so two pulls of the same vault give the
+  same file.
+- A value is written as is when it holds only plain characters, between single quotes
+  otherwise (multi-line values such as a PEM key included), and between double quotes when
+  it contains a single quote.
+- Nothing is ever expanded or executed when the file is read. A value that no quoting can
+  carry safely (a single quote together with `"`, `$`, a backtick or `\`) is refused with
+  its name: use `--format json` for that vault.
+
+Every common reader loads it as is:
+
+```bash
+set -a; . ./.env; set +a                 # a shell (bash, zsh, sh)
+node --env-file=.env server.js           # Node.js 20.12 or later
+```
+
+```js
+import 'dotenv/config'; // Node.js, with the dotenv package
+```
+
+```python
+from dotenv import load_dotenv  # Python, with python-dotenv
+load_dotenv()
+```
+
+One exception: `docker run --env-file` reads values literally (it would keep the quotes)
+and refuses multi-line values. Hand the variables to Docker through `run` instead:
+
+```bash
+sharedenv run prod -- docker run -e DATABASE_URL -e STRIPE_KEY my-app
+```
+
+#### JSON
+
+`sharedenv pull prod --format json` prints one object, names sorted, every value a string:
+
+```json
+{
+  "APP_NAME": "Acme billing",
+  "DATABASE_URL": "postgres://app:s3cret@db.internal:5432/app",
+  "JWT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----",
+  "SMTP_PASSWORD": "it's a pass",
+  "STRIPE_KEY": "sk_test_example"
+}
+```
+
+One value, from a shell:
+
+```bash
+sharedenv pull prod --format json | jq -r .DATABASE_URL
+```
+
+From a program:
+
+```js
+// Node.js
+import { execFileSync } from 'node:child_process';
+
+const secrets = JSON.parse(
+  execFileSync('sharedenv', ['pull', 'prod', '--format', 'json'], { encoding: 'utf8' })
+);
+console.log(secrets.DATABASE_URL);
+```
+
+```python
+# Python
+import json
+import subprocess
+
+secrets = json.loads(
+    subprocess.run(
+        ["sharedenv", "pull", "prod", "--format", "json"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+)
+print(secrets["DATABASE_URL"])
+```
+
+If the command fails (wrong password, unknown vault, no network), it exits with a non-zero
+code and says why on stderr: `execFileSync` throws, and `check=True` raises.
 
 ### Accept what your team shares with you
 
