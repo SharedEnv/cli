@@ -1,130 +1,208 @@
 # sharedenv CLI
 
-Pull and run with your [sharedenv](https://sharedenv.com) secrets, decrypted on your machine.
+**The zero-knowledge secrets vault for teams, in your terminal.**
 
-sharedenv is a zero-knowledge secrets vault. Secrets are encrypted before they leave your
-browser or your terminal, and decrypted only on the devices of the people they are shared
-with. The server stores sealed blobs and public keys: it never sees a secret, your master
-password or your private key. This CLI is one of those devices.
+[![npm](https://img.shields.io/npm/v/@sharedenv/cli)](https://www.npmjs.com/package/@sharedenv/cli)
+[![license](https://img.shields.io/npm/l/@sharedenv/cli)](LICENSE)
 
-## Install
-
-```bash
-npm install -g @sharedenv/cli     # Node.js 20.19 or later
-```
-
-## Quick start
+Your `.env` files have no business in Slack, in an email or in a git repo. With
+[sharedenv](https://sharedenv.com), your team keeps its environment variables, API keys and
+certificates in shared vaults. The CLI brings them to your commands, decrypted on your
+machine: sharedenv itself never sees a single secret.
 
 ```bash
-sharedenv login                      # once per machine
-sharedenv list                       # your safes, and the shares waiting for you
-sharedenv run prod -- npm start      # run a command with the secrets in its environment
-sharedenv pull prod --out .env       # or write them to a file only you can read
-```
-
-`prod` is the name (or id) of a safe. Create safes and share them from the web app; the CLI
-reads them.
-
-## Commands
-
-| Command                                                         | What it does                                                  |
-| --------------------------------------------------------------- | ------------------------------------------------------------- |
-| `login [--api <url>] [--identifier <id>]`                       | Sign in. Keeps the session cookies, nothing else.             |
-| `list`                                                          | Your safes, then the shares waiting for your answer.          |
-| `pull <safe> [--out <file>] [--format dotenv\|json]`            | Print or write the decrypted secrets.                         |
-| `run <safe> [--allow-unsafe-env] [--override-env] -- <command>` | Run a command with the secrets in its environment, in memory. |
-| `accept <safe> [--team <id>] [--yes] [--fingerprint <fp>]`      | Accept a share after checking who sealed it.                  |
-| `decline <safe> [--team <id>]`                                  | Decline a share.                                              |
-| `fingerprint`                                                   | Your public-key fingerprint, to read to a teammate.           |
-| `logout`                                                        | Close the session on the server, and forget it here.          |
-
-`sharedenv help <command>` gives every option of a command.
-
-## In CI and scripts
-
-Nothing is asked when there is no terminal: give the CLI what it would ask for.
-
-```bash
-export SHAREDENV_IDENTIFIER=ci@example.com
-export SHAREDENV_PASSWORD=...        # from your CI's secret store
+npm install -g @sharedenv/cli
 sharedenv login
-sharedenv run prod -- ./deploy.sh
+sharedenv run prod -- npm start
 ```
 
-- **Use an account dedicated to the job.** The master password opens every safe of its
-  account: share with that account only the safes the job needs, read-only.
-- **Log in at the start of each job.** Runners are disposable; so is the session.
-- **A second factor needs `SHAREDENV_OTP`**, a code a job cannot produce on its own. The
-  setup this version supports is a CI account without one, limited as above.
-- `run` exits with the command's own exit code, so the job fails when the command does.
+## Why teams use it
 
-## Security model
+- **One source of truth for every environment.** One vault per project or environment
+  (dev, staging, prod), shared with exactly the people who need it. No more "can you send me
+  the new key?".
+- **Nothing on disk.** `sharedenv run` starts your app with its secrets in memory. No stale
+  `.env` lying around on laptops, no file to leak.
+- **The same secrets in CI.** Your pipeline fetches what it needs at run time, instead of a
+  copy of every secret in every tool.
+- **Zero-knowledge, for real.** Secrets are encrypted before they leave your device and
+  decrypted only on the devices of the people you share them with. A breach of our servers
+  would expose encrypted values, never a secret.
 
-What the CLI does so that the server — or anyone who controls it — learns nothing and
-changes nothing unnoticed:
+## Get started in two minutes
 
-- **Your password never leaves the process.** The login sends a verifier derived from it
-  (scrypt, then HMAC, kept separate from the key that unlocks the vault). The private key is
-  unwrapped in memory and never written anywhere. Key-derivation parameters sent by the
-  server are refused below a fixed floor: a server cannot make your password cheap to guess.
-- **Keys are checked, not believed.** Your public key is derived from your private key, and
-  a server that names another one is refused. A share opens only if it was sealed by its
-  sender's key; `accept` shows that key's fingerprint, and remembers it on this machine
-  (`~/.sharedenv/pins.json`): a different key later is never taken without your explicit yes.
-  Compare fingerprints with people over another channel (`sharedenv fingerprint`), or give
-  the expected one with `--fingerprint` in scripts.
-- **A value cannot be moved.** Each secret is bound to its safe and its name: a server that
-  serves one secret's value under another name, or from another safe, is refused.
-- **`run` does not let a safe take over the machine.** Anyone who can write to a safe
-  chooses its values. Variables that make a program run code or reroute its traffic
-  (`LD_*`, `PATH`, `NODE_OPTIONS`, `*_PROXY`, `NODE_EXTRA_CA_CERTS`…) are held back unless
-  you pass `--allow-unsafe-env`; a variable your environment already sets is not replaced
-  unless you pass `--override-env`. The command never receives `SHAREDENV_*` variables —
-  the master password stays with the CLI.
-- **`pull` writes files that are safe to source.** Values are quoted so that a shell expands
-  and executes nothing (`set -a; . ./.env` is fine); a value no safe quoting can carry is
-  refused by name (use `--format json` or `run`). `--out` writes the file readable by you
-  only, replacing it atomically.
-- **Transport.** HTTPS only (plain HTTP to `localhost` only), no redirects followed.
+1. **Create your account** on [sharedenv.com](https://sharedenv.com) and your first vault.
+   It is free to start, no credit card.
+2. **Install the CLI** (Node.js 20.19 or later):
+   ```bash
+   npm install -g @sharedenv/cli
+   ```
+3. **Sign in** with your email (or username) and your master password, plus your
+   two-factor code if your account has one:
+   ```bash
+   sharedenv login
+   ```
+4. **Use your vaults:**
+   ```bash
+   sharedenv list                      # your vaults
+   sharedenv run prod -- npm start     # your app, with the prod secrets
+   ```
+
+## Everyday use
+
+### Run anything with its secrets
+
+```bash
+sharedenv run prod -- npm start
+sharedenv run staging -- docker compose up
+sharedenv run prod -- python manage.py migrate
+```
+
+The secrets reach the command as environment variables, in memory. The command's exit code
+is passed through, so scripts and CI behave exactly as without sharedenv.
+
+A variable your shell already sets wins over the vault, so a local `DATABASE_URL` is never
+replaced behind your back: add `--override-env` when you want the vault's value.
+
+### Write a .env file
+
+```bash
+sharedenv pull prod --out .env       # a file only you can read
+sharedenv pull prod --format json    # for scripts and tools
+```
+
+The file works with dotenv-style libraries and can be sourced by a shell
+(`set -a; . ./.env; set +a`): every value is quoted so that nothing in it gets executed.
+
+### Accept what your team shares with you
+
+When a teammate shares a vault with you, it waits for your answer:
+
+```bash
+sharedenv list                # the shares waiting for you, with who sent them
+sharedenv accept staging      # shows the sender's key fingerprint, then asks
+sharedenv decline staging
+```
+
+Before you accept, compare the fingerprint with the sender over another channel (a call,
+a chat). It proves the share really comes from them. They can check yours the same way:
+`sharedenv fingerprint`.
+
+### Sign out
+
+```bash
+sharedenv logout              # closes the session on our side too
+```
+
+## In CI/CD
+
+The CLI asks nothing when there is no terminal: give it what it would ask for, from your
+CI's secret store.
+
+**GitHub Actions**
+
+```yaml
+- run: npm install -g @sharedenv/cli
+- run: sharedenv login
+  env:
+    SHAREDENV_IDENTIFIER: ${{ secrets.SHAREDENV_IDENTIFIER }}
+    SHAREDENV_PASSWORD: ${{ secrets.SHAREDENV_PASSWORD }}
+- run: sharedenv run prod -- ./deploy.sh
+  env:
+    SHAREDENV_PASSWORD: ${{ secrets.SHAREDENV_PASSWORD }}
+```
+
+**GitLab CI**
+
+```yaml
+deploy:
+  script:
+    - npm install -g @sharedenv/cli
+    - sharedenv login
+    - sharedenv run prod -- ./deploy.sh
+  # SHAREDENV_IDENTIFIER and SHAREDENV_PASSWORD: masked CI/CD variables
+```
+
+**Docker** (the secrets are fetched when the container starts, never baked into the image)
+
+```dockerfile
+RUN npm install -g @sharedenv/cli
+CMD ["sh", "-c", "sharedenv login && exec sharedenv run prod -- node server.js"]
+```
+
+```bash
+docker run -e SHAREDENV_IDENTIFIER -e SHAREDENV_PASSWORD my-app
+```
+
+Good practice for pipelines:
+
+- **Use a dedicated account** for CI, and share with it only the vaults the job needs,
+  read-only. Its master password opens every vault of that account.
+- **Prefer `run` to `pull`**, and never print a `pull` to the job log.
+- **A second factor needs a code at login** (`SHAREDENV_OTP`), which a pipeline cannot
+  produce on its own: keep the CI account without one, and limited as above.
+
+## How your secrets stay yours
+
+- **Encrypted on your device.** AES-256-GCM for the secrets, sharing through signed ECDH
+  (secp256k1), your password stretched with scrypt. Standard primitives, nothing home-made.
+- **Your password and your private key never leave your machine.** Signing in sends a
+  verifier derived from your password, never the password. Your private key is unlocked in
+  memory for the command, and never written anywhere.
+- **You know who shares with you.** A share opens only if it was sealed by its sender, and
+  the CLI remembers the keys it has seen: if someone's key ever changes, it stops and asks.
+- **A vault cannot take over your machine.** Anyone who can edit a vault chooses its
+  values, so `run` holds back variables that would make a program run code or reroute its
+  traffic (`LD_*`, `PATH`, `NODE_OPTIONS`, proxies, custom certificates...) unless you pass
+  `--allow-unsafe-env`. Your master password is never passed to the command.
+- **Open source.** The CLI and its cryptography (`lib/crypto/`) are here for anyone to
+  read. Found something? See [SECURITY.md](SECURITY.md).
 
 What it does not protect against, said plainly:
 
-- **First contact.** The first key the CLI sees for someone is the one the server serves.
-  Pinning protects every later contact; comparing fingerprints protects the first.
-- **After acceptance**, the sender of a share is not checked again: a server that replaced an
-  already accepted envelope would not be noticed.
-- **Replay.** A server could serve an older value of the same secret, sealed under the same
-  key.
-- **Your own account on your own machine.** The session file is a bearer credential (mode
-  0600; `logout` revokes it). A program running as you can read it, and the CLI's memory.
+- **Names.** Vault names and secret names (like `DATABASE_URL`) are stored in clear, so
+  that they can be listed and organized; values, and the URL and username that go with
+  them, are encrypted. Never put a secret in a name.
+- **The first contact.** The first key the CLI sees for someone is the one our directory
+  serves; comparing fingerprints once settles it for good.
+- **After you accept a share**, its sender is not checked again; and an older value of the
+  same secret could be served back to you.
+- **Your own account on your own machine.** The session file (`~/.sharedenv/session.json`,
+  readable by you only) lets a program running as you act as you: sign out on machines you
+  do not trust.
 
-## Files and environment
+## Reference
 
-|                             |                                                      |
-| --------------------------- | ---------------------------------------------------- |
-| `~/.sharedenv/session.json` | The session cookies of your last login (0600).       |
-| `~/.sharedenv/pins.json`    | The public keys this machine has vouched for (0600). |
-| `SHAREDENV_API`             | API URL (default `https://api.sharedenv.com`).       |
-| `SHAREDENV_IDENTIFIER`      | Email or username, for a login without questions.    |
-| `SHAREDENV_PASSWORD`        | Master password, for commands without questions.     |
-| `SHAREDENV_OTP`             | Second-factor code, for a login without questions.   |
-| `SHAREDENV_HOME`            | Where the two files live (default `~/.sharedenv`).   |
+| Command                                                               | What it does                                               |
+| --------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `sharedenv login [--api <url>] [--identifier <id>]`                   | Sign in. Keeps the session, nothing else.                  |
+| `sharedenv list`                                                      | Your vaults, then the shares waiting for your answer.      |
+| `sharedenv run <vault> -- <command>`                                  | Run a command with the vault's secrets in its environment. |
+| `sharedenv pull <vault> [--out <file>] [--format dotenv\|json]`       | Print or write the secrets.                                |
+| `sharedenv accept <vault> [--team <id>] [--yes] [--fingerprint <fp>]` | Accept a share after checking who sealed it.               |
+| `sharedenv decline <vault> [--team <id>]`                             | Decline a share.                                           |
+| `sharedenv fingerprint`                                               | Your key fingerprint, to read to a teammate.               |
+| `sharedenv logout`                                                    | Close the session, on our side and on this machine.        |
 
-## Exit codes
+`<vault>` is a vault's name or id. `sharedenv help <command>` lists every option.
 
-`0` success · `1` error · `2` wrong usage · `130` cancelled. With `run`: the command's own
-code, `128 + n` when signal `n` ended it, `127` when the command does not exist.
+| Environment variable   | Use                                                     |
+| ---------------------- | ------------------------------------------------------- |
+| `SHAREDENV_IDENTIFIER` | Email or username, for a login without questions.       |
+| `SHAREDENV_PASSWORD`   | Master password, for commands without questions.        |
+| `SHAREDENV_OTP`        | Two-factor code, for a login without questions.         |
+| `SHAREDENV_API`        | API URL (default `https://api.sharedenv.com`).          |
+| `SHAREDENV_HOME`       | Where the CLI keeps its files (default `~/.sharedenv`). |
 
-## The code
+The CLI keeps two files there, both readable by you only: `session.json` (your session)
+and `pins.json` (the public keys this machine has checked). Never a secret, never your
+password, never your private key.
 
-The CLI is small and has one dependency, [`@noble/curves`](https://github.com/paulmillr/noble-curves)
-(secp256k1). Its cryptography is in `lib/crypto/`, as readable files — the ones the
-sharedenv server runs, byte-compatible with the web app's: `wallet.js` and `keypass.js`
-(sealing to a public key), `kdf.js` (password stretching and the KDF floor), `secretBlob.js`
-(secrets bound to their place), `aes.js`, `fingerprint.js`.
+Exit codes: `0` success, `1` error, `2` wrong usage, `130` cancelled. With `run`: the
+command's own code, `128 + n` when signal `n` ended it, `127` when the command does not
+exist.
 
-## Security and license
+## License
 
-Found a vulnerability? Report it privately — see [SECURITY.md](SECURITY.md).
-
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Made by
+[SharedEnv](https://sharedenv.com).

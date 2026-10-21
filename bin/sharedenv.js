@@ -185,7 +185,7 @@ async function cmdRun({ values, positionals: [ref], command: [cmd, ...args] }) {
   if (kept.length) {
     note(
       `sharedenv: not overriding ${kept.sort().join(', ')} — your environment already sets ` +
-        'them (--override-env to let the safe replace them).'
+        'them (--override-env to let the vault replace them).'
     );
   }
   saveSession(); // the command may run for days
@@ -198,13 +198,13 @@ async function cmdList() {
   const byName = (a, b) => nameOf(a).localeCompare(nameOf(b));
   const safes = (await listAll(client, '/safes', 'safes')).sort(byName);
   const { direct, team } = await listPendingShares(client);
-  const lines = [safes.length ? 'Safes:' : 'No safes yet.'];
+  const lines = [safes.length ? 'Vaults:' : 'No vaults yet.'];
   for (const s of safes) {
     const via = Array.isArray(s.via) && !s.via.includes('direct') ? '  (via team)' : '';
     lines.push(`  ${s.name}  ${s._id}  ${LEVEL[s.level] || s.level}${via}`);
   }
   if (direct.length || team.length) {
-    lines.push('', 'Waiting for your answer (sharedenv accept|decline <safe>):');
+    lines.push('', 'Waiting for your answer (sharedenv accept|decline <vault>):');
     for (const p of direct.sort(byName)) {
       lines.push(
         `  ${p.safe?.name}  ${p.safeId}  ${LEVEL[p.level] || p.level}  from ${senderLabel(p)}` +
@@ -370,17 +370,17 @@ const COMMANDS = {
     run: cmdLogin,
   },
   pull: {
-    usage: 'pull <safe> [--out <file>] [--format dotenv|json]',
+    usage: 'pull <vault> [--out <file>] [--format dotenv|json]',
     summary: 'Print or write the decrypted secrets',
     details:
-      '<safe> is a safe id or name. --out writes the file readable by you only. A dotenv\n' +
+      '<vault> is a vault name or id. --out writes the file readable by you only. A dotenv\n' +
       'file is safe to source in a shell: values are quoted so that none is expanded.',
     options: { out: { type: 'string' }, format: { type: 'string', default: 'dotenv' } },
     positionals: 1,
     run: cmdPull,
   },
   run: {
-    usage: 'run <safe> [--allow-unsafe-env] [--override-env] -- <command> [args...]',
+    usage: 'run <vault> [--allow-unsafe-env] [--override-env] -- <command> [args...]',
     summary: 'Run a command with the secrets in its environment',
     details:
       'The secrets reach the command in memory, never on disk. Held back unless asked:\n' +
@@ -394,14 +394,14 @@ const COMMANDS = {
   },
   list: {
     usage: 'list',
-    summary: 'Your safes, then the shares waiting for your answer',
+    summary: 'Your vaults, then the shares waiting for your answer',
     options: {},
     positionals: 0,
     run: cmdList,
   },
   accept: {
     usage:
-      'accept <safe> [--team <id>] [--yes] [--fingerprint <fp>] [--accept-key-change]\n' +
+      'accept <vault> [--team <id>] [--yes] [--fingerprint <fp>] [--accept-key-change]\n' +
       '                 [--team-fingerprint <fp>]',
     summary: 'Accept a share after checking who sealed it',
     details:
@@ -421,7 +421,7 @@ const COMMANDS = {
     run: cmdAccept,
   },
   decline: {
-    usage: 'decline <safe> [--team <id>]',
+    usage: 'decline <vault> [--team <id>]',
     summary: 'Decline a share',
     options: { team: { type: 'string' } },
     positionals: 1,
