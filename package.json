@@ -21,7 +21,7 @@
     "url": "https://github.com/SharedEnv/cli/issues"
   },
   "bin": {
-    "sharedenv": "./bin/sharedenv.js"
+    "sharedenv": "bin/sharedenv.js"
   },
   "engines": {
     "node": ">=20.19"
