@@ -12,7 +12,8 @@ import { Writable } from 'stream';
 import { parseArgs } from 'util';
 import { fingerprintOf } from '../lib/crypto.js';
 import { apiBase, createClient, expectOk, listAll } from '../lib/api.js';
-import { login, publicKeyOf, unlockPrivateKey } from '../lib/auth.js';
+import { login, publicKeyOf, unlockAccount } from '../lib/auth.js';
+import { syncLog, watchWarnings } from '../lib/transparency.js';
 import { childEnv, splitUnsafeEnv } from '../lib/env.js';
 import { FORMATS } from '../lib/format.js';
 import { runChild } from '../lib/run.js';
@@ -121,10 +122,25 @@ function saveSession() {
   connected.session.cookies = cookies;
 }
 
+// Each time the vault opens: is the key the public log holds for us still ours? A
+// warning, never a refusal - reading your own secrets seals nothing to anyone.
+async function watchOwnKey(client, { privateKey, userId }) {
+  try {
+    const report = await syncLog(client, {
+      store,
+      watch: { [`user:${userId}`]: publicKeyOf(privateKey) },
+    });
+    for (const line of watchWarnings(report)) note(line);
+  } catch (err) {
+    note(`WARNING: ${err.message}.`);
+  }
+}
+
 async function unlock() {
   const client = connect();
-  const privateKey = await unlockPrivateKey(client, await masterPassword());
-  return { client, privateKey };
+  const account = await unlockAccount(client, await masterPassword());
+  await watchOwnKey(client, account);
+  return { client, privateKey: account.privateKey };
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────────────
@@ -148,9 +164,10 @@ async function cmdLogin({ values }) {
   const client = createClient({ baseUrl, cookies, userAgent: USER_AGENT });
   const otp = async () => process.env.SHAREDENV_OTP || (await ask('Two-factor code: '));
   await login(client, { identifier, password, otp });
-  await unlockPrivateKey(client, password); // the vault opens: only then is anything kept
+  const account = await unlockAccount(client, password); // the vault opens: only then is anything kept
   store.writeSession({ baseUrl, cookies: client.cookies() });
   note(`Signed in to ${baseUrl}.`);
+  await watchOwnKey(client, account);
 }
 
 async function cmdPull({ values, positionals: [ref] }) {
@@ -311,9 +328,10 @@ async function cmdAccept({ values, positionals: [ref] }) {
   const { client, privateKey } = await unlock();
   const safeId = await resolvePendingShare(client, ref, values.team);
   const confirm = confirmShare(values);
+  const log = { store };
   const result = values.team
-    ? await acceptTeamShare(client, privateKey, values.team, safeId, { confirm })
-    : await acceptShare(client, privateKey, safeId, { confirm });
+    ? await acceptTeamShare(client, privateKey, values.team, safeId, { confirm, log })
+    : await acceptShare(client, privateKey, safeId, { confirm, log });
   note(result.accepted ? 'Accepted.' : 'Left pending.');
 }
 

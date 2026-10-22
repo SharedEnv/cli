@@ -248,6 +248,11 @@ Good practice for pipelines:
   memory for the command, and never written anywhere.
 - **You know who shares with you.** A share opens only if it was sealed by its sender, and
   the CLI remembers the keys it has seen: if someone's key ever changes, it stops and asks.
+- **A key cannot be swapped in our database without a trace.** Every public key the server
+  hands out is first written to a log that only grows, each entry chained to the previous
+  one by its hash. The CLI trusts a key only if it is the last one logged for its owner,
+  warns you when a key that is not yours is logged under your name, and refuses a log that
+  rewrites what it already checked.
 - **A vault cannot take over your machine.** Anyone who can edit a vault chooses its
   values, so `run` holds back variables that would make a program run code or reroute its
   traffic (`LD_*`, `PATH`, `NODE_OPTIONS`, proxies, custom certificates...) unless you pass
@@ -260,8 +265,10 @@ What it does not protect against, said plainly:
 - **Names.** Vault names and secret names (like `DATABASE_URL`) are stored in clear, so
   that they can be listed and organized; values, and the URL and username that go with
   them, are encrypted. Never put a secret in a name.
-- **The first contact.** The first key the CLI sees for someone is the one our directory
-  serves; comparing fingerprints once settles it for good.
+- **A swap is caught, not prevented.** Someone who can write to our database could still
+  log a key of their own: the log keeps the trace, and its owner is warned the next time
+  they unlock. Someone who controls our servers themselves could show you a different log.
+  Comparing fingerprints once with someone settles it for good.
 - **After you accept a share**, its sender is not checked again; and an older value of the
   same secret could be served back to you.
 - **Your own account on your own machine.** The session file (`~/.sharedenv/session.json`,
@@ -291,9 +298,9 @@ What it does not protect against, said plainly:
 | `SHAREDENV_API`        | API URL (default `https://api.sharedenv.com`).          |
 | `SHAREDENV_HOME`       | Where the CLI keeps its files (default `~/.sharedenv`). |
 
-The CLI keeps two files there, both readable by you only: `session.json` (your session)
-and `pins.json` (the public keys this machine has checked). Never a secret, never your
-password, never your private key.
+The CLI keeps three files there, all readable by you only: `session.json` (your session),
+`pins.json` (the public keys this machine has checked) and `log.json` (how far it checked
+the public key log). Never a secret, never your password, never your private key.
 
 Exit codes: `0` success, `1` error, `2` wrong usage, `130` cancelled. With `run`: the
 command's own code, `128 + n` when signal `n` ended it, `127` when the command does not
