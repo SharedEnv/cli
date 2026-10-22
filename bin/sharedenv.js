@@ -164,7 +164,16 @@ async function cmdLogin({ values }) {
   const client = createClient({ baseUrl, cookies, userAgent: USER_AGENT });
   const otp = async () => process.env.SHAREDENV_OTP || (await ask('Two-factor code: '));
   await login(client, { identifier, password, otp });
-  const account = await unlockAccount(client, password); // the vault opens: only then is anything kept
+  // The vault opens: only then is anything kept. The server just accepted this password,
+  // so a vault it does not open was sealed under the one before a reset.
+  const account = await unlockAccount(client, password).catch((err) => {
+    if (err.code !== 'VAULT_SEALED') throw err;
+    throw new Error(
+      'your password was reset, and the vault is still sealed under the old one. Sign in ' +
+        'once on the web app and enter your recovery code: the vault then opens with the new ' +
+        'password, here too'
+    );
+  });
   store.writeSession({ baseUrl, cookies: client.cookies() });
   note(`Signed in to ${baseUrl}.`);
   await watchOwnKey(client, account);
