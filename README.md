@@ -13,7 +13,8 @@ machine: sharedenv itself never sees a single secret.
 ```bash
 npm install -g @sharedenv/cli
 sharedenv login
-sharedenv run prod -- npm start
+sharedenv link                # once per project: pick its vault
+sharedenv run -- npm start    # your app, with the vault's secrets
 ```
 
 ## Why teams use it
@@ -31,8 +32,8 @@ sharedenv run prod -- npm start
 
 ## Get started in two minutes
 
-1. **Create your account** on [sharedenv.com](https://sharedenv.com) and your first vault.
-   It is free to start, no credit card.
+1. **Create your account** on [sharedenv.com](https://sharedenv.com). It is free to start,
+   no credit card.
 2. **Install the CLI** (Node.js 20.19 or later):
    ```bash
    npm install -g @sharedenv/cli
@@ -42,20 +43,61 @@ sharedenv run prod -- npm start
    ```bash
    sharedenv login
    ```
-4. **Use your vaults:**
+4. **Link your project to a vault**, from the project's directory:
    ```bash
-   sharedenv list                      # your vaults
-   sharedenv run prod -- npm start     # your app, with the prod secrets
+   sharedenv create my-app-dev   # a new vault, or pick one you already have:
+   sharedenv link                # lists your vaults, you choose
+   ```
+5. **Use it:**
+   ```bash
+   sharedenv set DATABASE_URL=postgres://localhost/app
+   sharedenv run -- npm start
    ```
 
+## Which vault a command works on
+
+You may have many vaults: your own, the ones people shared with you, the ones your teams
+reach. A command never guesses which one you mean.
+
+- **In a project**, `sharedenv link` writes `.sharedenv.json` in its directory. It holds the
+  vault's id and nothing else, no secret: commit it, and your whole team works on the same
+  vault. Every command run in that directory, or below it, uses that vault.
+- **Anywhere**, `-v <name or id>` names the vault: `sharedenv get API_KEY -v staging`.
+- **A name two of your vaults share is refused**, with both listed (id, owner, teams): give
+  the id instead. `sharedenv create` refuses a name you already have.
+- **Every command says which vault it used**, on stderr: a link in a repository you cloned
+  might not name the vault you expect.
+
+```bash
+sharedenv vaults                       # every vault you can open: id, your access, owner, teams
+sharedenv show                         # this vault: members, teams, names of its keys
+```
+
+`vaults` and `show` never ask for your master password: vault and key names are stored in
+clear, only values are encrypted.
+
 ## Everyday use
+
+### Keys
+
+```bash
+sharedenv set API_KEY=sk_test_1 DEBUG=1   # add or replace
+sharedenv set TLS_KEY < key.pem            # value from stdin
+sharedenv set STRIPE_KEY                   # value asked, not echoed
+sharedenv get API_KEY                      # one value, on stdout
+sharedenv unset DEBUG                      # remove
+```
+
+A key given without a value has its value asked without echo, or read from stdin: it lands
+neither in your shell history nor in the process list. `get` prints the value as is, with
+nothing added when the output is a pipe or a file (`export API_KEY=$(sharedenv get API_KEY)`).
 
 ### Run anything with its secrets
 
 ```bash
-sharedenv run prod -- npm start
-sharedenv run staging -- docker compose up
-sharedenv run prod -- python manage.py migrate
+sharedenv run -- npm start
+sharedenv run -v staging -- docker compose up
+sharedenv run -v prod -- python manage.py migrate
 ```
 
 The secrets reach the command as environment variables, in memory. The command's exit code
@@ -67,9 +109,9 @@ replaced behind your back: add `--override-env` when you want the vault's value.
 ### Get your secrets as a file, or as JSON
 
 ```bash
-sharedenv pull prod                    # dotenv, on stdout
-sharedenv pull prod --out .env         # the same, in a file only you can read
-sharedenv pull prod --format json      # JSON, for scripts and programs
+sharedenv pull                         # dotenv, on stdout
+sharedenv pull --out .env              # the same, in a file only you can read
+sharedenv pull --format json           # JSON, for scripts and programs
 ```
 
 stdout carries the secrets and nothing else (questions and messages go to stderr), so
@@ -78,7 +120,7 @@ ask for your master password: set `SHAREDENV_PASSWORD`.
 
 #### dotenv (the default)
 
-For a vault holding five secrets, `sharedenv pull prod` prints:
+For a vault holding five secrets, `sharedenv pull` prints:
 
 ```dotenv
 APP_NAME='Acme billing'
@@ -119,12 +161,12 @@ One exception: `docker run --env-file` reads values literally (it would keep the
 and refuses multi-line values. Hand the variables to Docker through `run` instead:
 
 ```bash
-sharedenv run prod -- docker run -e DATABASE_URL -e STRIPE_KEY my-app
+sharedenv run -- docker run -e DATABASE_URL -e STRIPE_KEY my-app
 ```
 
 #### JSON
 
-`sharedenv pull prod --format json` prints one object, names sorted, every value a string:
+`sharedenv pull --format json` prints one object, names sorted, every value a string:
 
 ```json
 {
@@ -136,12 +178,6 @@ sharedenv run prod -- docker run -e DATABASE_URL -e STRIPE_KEY my-app
 }
 ```
 
-One value, from a shell:
-
-```bash
-sharedenv pull prod --format json | jq -r .DATABASE_URL
-```
-
 From a program:
 
 ```js
@@ -149,7 +185,7 @@ From a program:
 import { execFileSync } from 'node:child_process';
 
 const secrets = JSON.parse(
-  execFileSync('sharedenv', ['pull', 'prod', '--format', 'json'], { encoding: 'utf8' })
+  execFileSync('sharedenv', ['pull', '-v', 'prod', '--format', 'json'], { encoding: 'utf8' })
 );
 console.log(secrets.DATABASE_URL);
 ```
@@ -161,7 +197,7 @@ import subprocess
 
 secrets = json.loads(
     subprocess.run(
-        ["sharedenv", "pull", "prod", "--format", "json"],
+        ["sharedenv", "pull", "-v", "prod", "--format", "json"],
         check=True, capture_output=True, text=True,
     ).stdout
 )
@@ -171,19 +207,33 @@ print(secrets["DATABASE_URL"])
 If the command fails (wrong password, unknown vault, no network), it exits with a non-zero
 code and says why on stderr: `execFileSync` throws, and `check=True` raises.
 
+### Share a vault
+
+```bash
+sharedenv share alice@example.com            # read access
+sharedenv share alice@example.com --write    # or --admin
+sharedenv share --team backend               # a team you are a member of
+sharedenv teams                              # your organizations and their teams
+```
+
+Sharing with a person shows the fingerprint of their key: compare it with them over another
+channel (a call, a chat) before you say yes, they read theirs with `sharedenv fingerprint`.
+The share then waits for their answer. Removing someone's access means changing the vault's
+key and re-encrypting every secret: that is done in the web app, as is managing teams and
+organizations.
+
 ### Accept what your team shares with you
 
 When a teammate shares a vault with you, it waits for your answer:
 
 ```bash
-sharedenv list                # the shares waiting for you, with who sent them
+sharedenv vaults              # the shares waiting for you, with who sent them
 sharedenv accept staging      # shows the sender's key fingerprint, then asks
 sharedenv decline staging
 ```
 
-Before you accept, compare the fingerprint with the sender over another channel (a call,
-a chat). It proves the share really comes from them. They can check yours the same way:
-`sharedenv fingerprint`.
+Before you accept, compare the fingerprint with the sender over another channel. It proves
+the share really comes from them.
 
 ### Sign out
 
@@ -194,7 +244,8 @@ sharedenv logout              # closes the session on our side too
 ## In CI/CD
 
 The CLI asks nothing when there is no terminal: give it what it would ask for, from your
-CI's secret store.
+CI's secret store. Name the vault by its id (`sharedenv vaults` shows it), or commit the
+project's `.sharedenv.json`.
 
 **GitHub Actions**
 
@@ -204,7 +255,7 @@ CI's secret store.
   env:
     SHAREDENV_IDENTIFIER: ${{ secrets.SHAREDENV_IDENTIFIER }}
     SHAREDENV_PASSWORD: ${{ secrets.SHAREDENV_PASSWORD }}
-- run: sharedenv run prod -- ./deploy.sh
+- run: sharedenv run -v 6721f0c2a8e4b1d3c5f70912 -- ./deploy.sh
   env:
     SHAREDENV_PASSWORD: ${{ secrets.SHAREDENV_PASSWORD }}
 ```
@@ -216,19 +267,19 @@ deploy:
   script:
     - npm install -g @sharedenv/cli
     - sharedenv login
-    - sharedenv run prod -- ./deploy.sh
-  # SHAREDENV_IDENTIFIER and SHAREDENV_PASSWORD: masked CI/CD variables
+    - sharedenv run -v "$SHAREDENV_VAULT" -- ./deploy.sh
+  # SHAREDENV_IDENTIFIER, SHAREDENV_PASSWORD and SHAREDENV_VAULT: masked CI/CD variables
 ```
 
 **Docker** (the secrets are fetched when the container starts, never baked into the image)
 
 ```dockerfile
 RUN npm install -g @sharedenv/cli
-CMD ["sh", "-c", "sharedenv login && exec sharedenv run prod -- node server.js"]
+CMD ["sh", "-c", "sharedenv login && exec sharedenv run -v \"$SHAREDENV_VAULT\" -- node server.js"]
 ```
 
 ```bash
-docker run -e SHAREDENV_IDENTIFIER -e SHAREDENV_PASSWORD my-app
+docker run -e SHAREDENV_IDENTIFIER -e SHAREDENV_PASSWORD -e SHAREDENV_VAULT my-app
 ```
 
 Good practice for pipelines:
@@ -246,13 +297,16 @@ Good practice for pipelines:
 - **Your password and your private key never leave your machine.** Signing in sends a
   verifier derived from your password, never the password. Your private key is unlocked in
   memory for the command, and never written anywhere.
-- **You know who shares with you.** A share opens only if it was sealed by its sender, and
-  the CLI remembers the keys it has seen: if someone's key ever changes, it stops and asks.
+- **You know who shares with you, and whom you share with.** A share opens only if it was
+  sealed by its sender, and the CLI remembers the keys it has seen: if someone's key ever
+  changes, it stops and asks.
 - **A key cannot be swapped in our database without a trace.** Every public key the server
   hands out is first written to a log that only grows, each entry chained to the previous
-  one by its hash. The CLI trusts a key only if it is the last one logged for its owner,
-  warns you when a key that is not yours is logged under your name, and refuses a log that
-  rewrites what it already checked.
+  one by its hash. The CLI seals to a key, or trusts its seal, only if it is the last one
+  logged for its owner; it warns you when a key that is not yours is logged under your
+  name, or under the name of a team whose key you hold, and refuses a log that rewrites
+  what it already checked. A warning is repeated at every unlock until you acknowledge it
+  with `sharedenv log --ack`.
 - **A vault cannot take over your machine.** Anyone who can edit a vault chooses its
   values, so `run` holds back variables that would make a program run code or reroute its
   traffic (`LD_*`, `PATH`, `NODE_OPTIONS`, proxies, custom certificates...) unless you pass
@@ -263,8 +317,7 @@ Good practice for pipelines:
 What it does not protect against, said plainly:
 
 - **Names.** Vault names and secret names (like `DATABASE_URL`) are stored in clear, so
-  that they can be listed and organized; values, and the URL and username that go with
-  them, are encrypted. Never put a secret in a name.
+  that they can be listed and organized; values are encrypted. Never put a secret in a name.
 - **A swap is caught, not prevented.** Someone who can write to our database could still
   log a key of their own: the log keeps the trace, and its owner is warned the next time
   they unlock. Someone who controls our servers themselves could show you a different log.
@@ -277,18 +330,29 @@ What it does not protect against, said plainly:
 
 ## Reference
 
-| Command                                                               | What it does                                               |
-| --------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `sharedenv login [--api <url>] [--identifier <id>]`                   | Sign in. Keeps the session, nothing else.                  |
-| `sharedenv list`                                                      | Your vaults, then the shares waiting for your answer.      |
-| `sharedenv run <vault> -- <command>`                                  | Run a command with the vault's secrets in its environment. |
-| `sharedenv pull <vault> [--out <file>] [--format dotenv\|json]`       | Print or write the secrets.                                |
-| `sharedenv accept <vault> [--team <id>] [--yes] [--fingerprint <fp>]` | Accept a share after checking who sealed it.               |
-| `sharedenv decline <vault> [--team <id>]`                             | Decline a share.                                           |
-| `sharedenv fingerprint`                                               | Your key fingerprint, to read to a teammate.               |
-| `sharedenv logout`                                                    | Close the session, on our side and on this machine.        |
+| Command                                                 | What it does                                                |
+| ------------------------------------------------------- | ----------------------------------------------------------- |
+| `sharedenv login [--api <url>] [--identifier <id>]`     | Sign in. Keeps the session, nothing else.                   |
+| `sharedenv logout`                                      | Close the session, on our side and on this machine.         |
+| `sharedenv vaults`                                      | Your vaults, then the shares waiting for your answer.       |
+| `sharedenv create <name>`                               | Create a vault (prints its id).                             |
+| `sharedenv link [<vault>]`                              | Link this directory to a vault (`.sharedenv.json`).         |
+| `sharedenv show`                                        | The vault: owner, members, teams, names of its keys.        |
+| `sharedenv get <KEY>`                                   | Print one value.                                            |
+| `sharedenv set <KEY>=<value>... [<KEY>]`                | Add or replace keys.                                        |
+| `sharedenv unset <KEY>...`                              | Remove keys.                                                |
+| `sharedenv run -- <command>`                            | Run a command with the vault's secrets in its environment.  |
+| `sharedenv pull [--out <file>] [--format dotenv\|json]` | Print or write every secret.                                |
+| `sharedenv share <email> [--write\|--admin]`            | Share the vault with a person.                              |
+| `sharedenv share --team <team> [--write\|--admin]`      | Share the vault with one of your teams.                     |
+| `sharedenv accept <vault> [--team <team>]`              | Accept a share after checking who sealed it.                |
+| `sharedenv decline <vault> [--team <team>]`             | Decline a share.                                            |
+| `sharedenv teams`                                       | Your organizations and their teams.                         |
+| `sharedenv fingerprint`                                 | Your key fingerprint, to read to a teammate.                |
+| `sharedenv log [--ack]`                                 | The public key log warnings kept here, or acknowledge them. |
 
-`<vault>` is a vault's name or id. `sharedenv help <command>` lists every option.
+Commands that work on a vault take `-v <name or id>`, or use the vault the current
+directory is linked to. `sharedenv help <command>` lists every option.
 
 | Environment variable   | Use                                                     |
 | ---------------------- | ------------------------------------------------------- |
@@ -300,11 +364,12 @@ What it does not protect against, said plainly:
 
 The CLI keeps three files there, all readable by you only: `session.json` (your session),
 `pins.json` (the public keys this machine has checked) and `log.json` (how far it checked
-the public key log). Never a secret, never your password, never your private key.
+the public key log, and the warnings not acknowledged yet). Never a secret, never your
+password, never your private key.
 
-Exit codes: `0` success, `1` error, `2` wrong usage, `130` cancelled. With `run`: the
-command's own code, `128 + n` when signal `n` ended it, `127` when the command does not
-exist.
+Exit codes: `0` success, `1` error, `2` wrong usage (an ambiguous vault name included),
+`130` cancelled. With `run`: the command's own code, `128 + n` when signal `n` ended it,
+`127` when the command does not exist.
 
 ## License
 
