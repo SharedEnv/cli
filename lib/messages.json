@@ -29,6 +29,7 @@
     "TEAM_KEY_LOG_FOREIGN": "The key of team {team} changed. If no lead replaced it, contact support.",
     "WRITE_BLOCKED_DEBT": "Cannot save: the key of this vault has to be renewed first. The vault's admins were emailed.",
     "WRITE_BLOCKED_TEAM_DEBT": "Cannot save: the key of team {team} has to be replaced first. Its leads were emailed.",
+    "WRITE_BLOCKED_KUBBLER_DEBT": "Cannot save for now: Kubbler is replacing its access key to this vault. Kubbler has been alerted, try again later.",
     "WRITE_BLOCKED_DEBT_ADMIN": "Renew the key of this vault to save in it.",
     "ROTATION_UNFINISHED": "Renewal interrupted. Finish it to save again.",
     "NO_PAYER": "Nobody can renew the key of this vault. Remove team {team}, or delete the vault.",
