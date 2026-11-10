@@ -1,6 +1,6 @@
 {
   "name": "@sharedenv/cli",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "type": "module",
   "description": "sharedenv CLI — pull and run with your zero-knowledge secrets, decrypted locally.",
   "license": "Apache-2.0",
