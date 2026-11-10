@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 // sharedenv — your zero-knowledge vaults in the terminal, decrypted locally. The master
 // password and the private key never leave this process and never touch disk; only the
-// session cookies and the public keys you vouched for are kept (~/.sharedenv).
+// session cookies and what this machine learned about keys are kept (~/.sharedenv).
 //
 // This file is the terminal: arguments, questions, output, exit codes. What happens to
 // keys and secrets lives in ../lib.
 
-import { readFileSync } from 'fs';
 import readline from 'readline';
 import { Writable } from 'stream';
 import { parseArgs } from 'util';
-import { fingerprintOf } from '../lib/crypto.js';
-import { apiBase, createClient, expectOk, listAll } from '../lib/api.js';
+import { fingerprintOf, fingerprintWords } from '../lib/crypto.js';
+import { VERSION, apiBase, createClient, expectOk, listAll } from '../lib/api.js';
 import { login, publicKeyOf, unlockAccount, whoAmI } from '../lib/auth.js';
+import { TrustRefusal, message } from '../lib/messages.js';
 import {
   acknowledgeAlerts,
   heldKeys,
   keptAlerts,
+  syncAnnouncements,
   syncLog,
   watchWarnings,
 } from '../lib/transparency.js';
@@ -26,15 +27,16 @@ import { LINK_FILE, findLink, writeLink } from '../lib/link.js';
 import { runChild } from '../lib/run.js';
 import {
   LEVELS,
-  SECRET_NAME,
+  WRITABLE_NAME,
   accessOf,
   createVault,
   describeVault,
   levelName,
   listSecretRows,
   listVaults,
-  openVault,
+  openVaultToWrite,
   pullSecrets,
+  rotationUnfinished,
   readSecret,
   readVault,
   resolveSafe,
@@ -48,24 +50,28 @@ import {
   declineTeamShare,
   listPendingShares,
   personLabel,
+  printable,
   resolvePendingShare,
   senderLabel,
 } from '../lib/shares.js';
 import {
-  assertPersonLogged,
   listTeams,
   lookupPerson,
   resolveTeam,
   shareWithPerson,
   shareWithTeam,
+  teamKeyToCompare,
   teamLabel,
 } from '../lib/sharing.js';
 import { createStore, writePrivate } from '../lib/store.js';
-import { pinKey, pinStatus, senderVerdict, teamKeyVerdict } from '../lib/trust.js';
+import {
+  createTrust,
+  pinStatus,
+  sameFingerprint,
+  senderVerdict,
+  teamKeyVerdict,
+} from '../lib/trust.js';
 
-const { version: VERSION } = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
-);
 const DEFAULT_API = 'https://api.sharedenv.com';
 const USER_AGENT = `sharedenv-cli/${VERSION}`;
 
@@ -73,10 +79,12 @@ const store = createStore();
 
 // ── Terminal ────────────────────────────────────────────────────────────────────────
 // Questions and notices go to stderr: stdout carries data only, so
-// `sharedenv pull > .env` writes the secrets and nothing else.
+// `sharedenv pull > .env` writes the secrets and nothing else. Names come from the server, and
+// nothing it names reaches the terminal unfiltered; only a value, on its own way out, is as is.
 
-const say = (text) => process.stdout.write(`${text}\n`);
-const note = (text) => process.stderr.write(`${text}\n`);
+const shown = (text) => String(text).split('\n').map(printable).join('\n');
+const say = (text) => process.stdout.write(`${shown(text)}\n`);
+const note = (text) => process.stderr.write(`${shown(text)}\n`);
 
 class UsageError extends Error {
   exitCode = 2;
@@ -155,36 +163,62 @@ function connect() {
 
 function saveSession() {
   if (!connected) return;
-  const cookies = connected.client.cookies();
-  if (JSON.stringify(cookies) === JSON.stringify(connected.session.cookies)) return;
-  store.writeSession({ baseUrl: connected.client.baseUrl, cookies });
-  connected.session.cookies = cookies;
+  const { client, session, userId = session.userId } = connected;
+  const cookies = client.cookies();
+  const same = JSON.stringify(cookies) === JSON.stringify(session.cookies);
+  if (same && userId === session.userId) return;
+  store.writeSession({ baseUrl: client.baseUrl, cookies, userId });
+  session.cookies = cookies;
+  session.userId = userId;
 }
 
-// Each time the vault opens: are the keys the public log holds for us - our own, and
-// those of the teams whose key we hold - still the ones we hold? A warning, never a
-// refusal: reading your own secrets seals nothing to anyone. What it found is kept
-// (~/.sharedenv/log.json) and said again at every unlock until `sharedenv log --ack`,
-// even when the log cannot be read this time.
+// Each time the vault opens: what the signed announcements say, and are the keys the public log
+// holds for us - our own, and those of the teams whose key we hold - still the ones we hold? A
+// warning, never a refusal: reading your own secrets seals nothing to anyone. What it found is
+// kept (for this account on this server) and said again at every unlock until `sharedenv log
+// --ack`, even when the log cannot be read this time.
 // → the watch, for every later read of the log in this run (a read that watches less
 // would let entries go by unchecked).
-async function watchKeys(client, account) {
-  const { watch, labels } = await heldKeys(client, account);
+async function watchKeys(client, account, kept) {
+  await syncAnnouncements(client, kept);
+  const { watch, labels, doubts } = await heldKeys(client, account, kept.readMemory());
   let report;
   try {
-    report = await syncLog(client, { store, watch });
+    report = await syncLog(client, { store: kept, watch });
   } catch (err) {
-    note(`WARNING: ${err.message}.`);
-    report = { alerts: keptAlerts(store) };
+    note(err.message);
+    report = { alerts: keptAlerts(kept) };
   }
   for (const line of watchWarnings(report, labels)) note(line);
+  for (const subject of doubts) {
+    note(message('TEAM_KEY_LOG_FOREIGN', { team: printable(labels[subject]) }));
+  }
   return watch;
 }
 
-async function unlock(client) {
-  const account = await unlockAccount(client, await masterPassword());
-  const watch = await watchKeys(client, account);
-  return { privateKey: account.privateKey, watch };
+// The account the server names opens a memory: it must be the one this machine knows for this key.
+async function unlockClaimed(client, password) {
+  const account = await unlockAccount(client, password);
+  if (!store.claimOwnKey(client.baseUrl, publicKeyOf(account.privateKey), account.userId)) {
+    throw new TrustRefusal('KEY_UNSAFE');
+  }
+  return account;
+}
+
+// `values`: the flags of the command, which may answer the guard's questions (guardAnswers).
+async function unlock(client, values = {}) {
+  const account = await unlockClaimed(client, await masterPassword());
+  connected.userId = String(account.userId);
+  const kept = store.forAccount(client.baseUrl, account.userId);
+  const watch = await watchKeys(client, account, kept);
+  return createTrust({
+    client,
+    store: kept,
+    privateKey: account.privateKey,
+    userId: String(account.userId),
+    watch,
+    answer: guardAnswers(values),
+  });
 }
 
 // ── Which vault ─────────────────────────────────────────────────────────────────────
@@ -202,7 +236,7 @@ async function targetVault(client, values) {
 
 // Said by every command that works on a vault: a link you did not write yourself (a
 // cloned repository) may name another vault than the one you expect.
-const using = (safe) => note(`sharedenv: vault "${safe.name}" (${safe._id})`);
+const using = (safe) => note(`sharedenv: vault "${printable(safe.name)}" (${safe._id})`);
 
 // The link of this directory, for display only: a broken one is not an error here.
 function linkedHere() {
@@ -217,101 +251,72 @@ const byName = (a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '
 
 // ── Trust ───────────────────────────────────────────────────────────────────────────
 
-// Is `publicKey` the key of `who`, as this machine knows them? A key seen before passes;
-// a new one is shown and asked about; a CHANGED one is never taken without its own yes
-// (or --accept-key-change). --fingerprint settles it for a script. A yes pins the key in
-// `pins` — the caller saves them once everything is agreed.
-async function vouchFor(pins, { subject, publicKey, who }, values, { question, changed }) {
-  const status = pinStatus(pins, subject, publicKey);
-  const fingerprint = fingerprintOf(publicKey);
-  note(`  key fingerprint ${fingerprint}${status === 'match' ? '  (known on this machine)' : ''}`);
-  if (status === 'changed') {
-    note(
-      `  WARNING: this machine knew ANOTHER key for ${who} ` +
-        `(${fingerprintOf(pins[subject])}). It changes only if they reset their keyring.`
-    );
-  } else if (status === 'new') {
-    note('  First time this machine sees this key: compare it with them.');
-  }
-  const verdict = senderVerdict(status, fingerprint, {
-    expected: values.fingerprint,
-    acceptKeyChange: values['accept-key-change'],
-    yes: values.yes,
-  });
-  if (verdict === 'refuse') {
-    note('  That is not the --fingerprint you gave.');
-    return false;
-  }
-  if (
-    verdict === 'ask' &&
-    !(await confirm(
-      status === 'changed' ? `${changed} Confirm it with them first. [y/N] ` : `${question} [y/N] `,
-      status === 'changed'
-        ? 'pass --fingerprint <fingerprint>, checked with them'
-        : 'pass --yes, or --fingerprint <fingerprint> checked with them'
-    ))
-  ) {
-    return false;
-  }
-  pinKey(pins, subject, publicKey);
-  return true;
-}
+// A fingerprint as it is read aloud, and as a script or SHAREDENV_TRUSTED_SEALERS names it.
+const spoken = (key) => `${fingerprintWords(key)} (${fingerprintOf(key)})`;
 
-// A team share sealed to the team's PREVIOUS key moves to its current key on accept.
-// Unless we sealed that key ourselves, it must be the one this machine knows for the
-// team, or its fingerprint is confirmed — by a human, or by --team-fingerprint.
-async function confirmTeamKey(pins, { share, teamPublicKey }, values) {
-  const subject = `team:${share.teamId}`;
-  const status = pinStatus(pins, subject, teamPublicKey);
-  const fingerprint = fingerprintOf(teamPublicKey);
-  const verdict = teamKeyVerdict(status, fingerprint, { expected: values['team-fingerprint'] });
-  if (verdict !== 'accept') {
-    note(
-      `  The share moves to the current key of team "${share.team?.name || share.teamId}", ` +
-        `fingerprint ${fingerprint}` +
-        (status === 'changed'
-          ? `; this machine knew ANOTHER key for it (${fingerprintOf(pins[subject])}).`
-          : ', never seen on this machine.')
-    );
-  }
-  if (verdict === 'refuse') {
-    note('  That is not the --team-fingerprint you gave.');
-    return false;
-  }
-  if (
-    verdict === 'ask' &&
-    !(await confirm(
-      'Trust this team key? Confirm it with a lead of the team first. [y/N] ',
-      'pass --team-fingerprint <fingerprint>, checked with a lead of the team'
-    ))
-  ) {
-    return false;
-  }
-  pinKey(pins, subject, teamPublicKey);
-  return true;
-}
+const SEAL_HINT = 'pass --yes, or --fingerprint <fingerprint> checked with them';
+const CHANGED_HINT = 'pass --fingerprint <fingerprint>, checked with them';
+const SEALER_HINT = 'list this fingerprint in SHAREDENV_TRUSTED_SEALERS, checked with them';
+const TEAM_HINT = 'pass --team-fingerprint <fingerprint>, checked with a lead of the team';
 
-// The human step of `accept`: who sealed the share, with what key, as this machine
-// knows it — then yes or no.
-function confirmShare(values) {
-  return async (opened) => {
-    const { share, senderKey } = opened;
-    const pins = store.readPins();
-    note(`"${share.safe?.name}" from ${senderLabel(share)}`);
-    const sender = {
-      subject: `user:${share.from?._id}`,
-      publicKey: senderKey,
-      who: senderLabel(share),
-    };
-    const asked = { question: 'Accept this share?', changed: 'Accept their NEW key?' };
-    if (!(await vouchFor(pins, sender, values, asked))) return false;
-    if (opened.teamKeyVouched === false && !(await confirmTeamKey(pins, opened, values))) {
+// The guard's questions. A flag answers only where it applies (`scripted`): opening a vault
+// has no --yes, it would take any key. Without a terminal, and without a flag, it is a no. A key
+// never seen is never answered by --yes (sujet 7): the first trust comes from a person, once.
+function guardAnswers(values) {
+  return async ({ code, people }, { vault, team, scripted }, memory) => {
+    if (code === 'TEAM_DEBT_SHARE') {
+      note(message(code, { team }));
+      return (
+        values.yes ||
+        confirm('Share anyway? [y/N] ', 'pass --yes, or wait for a lead to replace the key')
+      );
+    }
+    const flags = scripted ? values : {};
+    const moved = code === 'FIRST_SEAL_MOVED';
+    const statusOf = (p) => (moved ? 'changed' : pinStatus(memory, p.subject || '', p.publicKey));
+    const verdicts = people.map((p) => {
+      const subject = p.subject || '';
+      const status = statusOf(p);
+      const fingerprint = fingerprintOf(p.publicKey);
+      note(
+        message(p.removed && code === 'NEW_SEALERS' ? 'NEW_SEALERS_REMOVED' : code, {
+          person: printable(p.label || subject),
+          vault,
+          team,
+          fingerprint: spoken(p.publicKey),
+        })
+      );
+      if (code === 'TEAM_KEY_UNKNOWN') {
+        return teamKeyVerdict(status, fingerprint, { expected: flags['team-fingerprint'] });
+      }
+      return senderVerdict(status, fingerprint, {
+        expected: flags.fingerprint,
+        acceptKeyChange: flags['accept-key-change'],
+        yes: flags.yes,
+      });
+    });
+    if (verdicts.includes('refuse')) {
+      note(message('FINGERPRINT_MISMATCH'));
       return false;
     }
-    store.writePins(pins);
-    return true;
+    if (verdicts.every((verdict) => verdict === 'accept')) return true;
+    if (code === 'TEAM_KEY_UNKNOWN') return confirm('Trust this team key? [y/N] ', TEAM_HINT);
+    if (code === 'NEW_SEALERS' && !scripted) return confirm('Trust their key? [y/N] ', SEALER_HINT);
+    if (code === 'KEY_CHANGED' || moved) return confirm('Go on? [y/N] ', CHANGED_HINT);
+    if (!process.stdin.isTTY && people.some((p) => statusOf(p) === 'new')) {
+      note(message('FINGERPRINT_REQUIRED'));
+      return false;
+    }
+    return confirm('Go on? [y/N] ', SEAL_HINT);
   };
 }
+
+// A key the caller named on the command line must be this one, known here or not.
+const namedKey = (expected) => (key) => {
+  if (!expected || sameFingerprint(expected, fingerprintOf(key))) return true;
+  note(message('FINGERPRINT_MISMATCH'));
+  return false;
+};
 
 // ── Commands: session ───────────────────────────────────────────────────────────────
 
@@ -336,17 +341,13 @@ async function cmdLogin({ values }) {
   await login(client, { identifier, password, otp });
   // The vault opens: only then is anything kept. The server just accepted this password,
   // so a vault it does not open was sealed under the one before a reset.
-  const account = await unlockAccount(client, password).catch((err) => {
-    if (err.code !== 'VAULT_SEALED') throw err;
-    throw new Error(
-      'your password was reset, and the vault is still sealed under the old one. Sign in ' +
-        'once on the web app and enter your recovery code: the vault then opens with the new ' +
-        'password, here too'
-    );
+  const account = await unlockClaimed(client, password).catch((err) => {
+    throw err.code === 'CREDENTIALS_INVALID' ? new TrustRefusal('VAULT_SEALED') : err;
   });
-  store.writeSession({ baseUrl, cookies: client.cookies() });
+  const userId = String(account.userId);
+  store.writeSession({ baseUrl, cookies: client.cookies(), userId });
   note(`Signed in to ${baseUrl}.`);
-  await watchKeys(client, account);
+  await watchKeys(client, account, store.forAccount(baseUrl, userId));
 }
 
 async function cmdLogout() {
@@ -388,18 +389,19 @@ async function cmdVaults() {
     lines.push(`  ${describeVault(row, me)}${String(row._id) === linked ? '  (linked here)' : ''}`);
   }
   const pendingName = (p) => ({ name: p.safe?.name });
+  const keyOf = (p) => (p.from?.publicKey ? spoken(p.from.publicKey) : 'none on file');
   if (direct.length || team.length) {
     lines.push('', 'Waiting for your answer (sharedenv accept|decline <vault>):');
     for (const p of direct.sort((a, b) => byName(pendingName(a), pendingName(b)))) {
       lines.push(
         `  ${p.safe?.name}  ${p.safeId}  ${levelName(p.level)}  from ${senderLabel(p)}` +
-          `  key ${p.fingerprint || 'none on file'}`
+          `  key ${keyOf(p)}`
       );
     }
     for (const p of team.sort((a, b) => byName(pendingName(a), pendingName(b)))) {
       lines.push(
         `  ${p.safe?.name}  ${p.safeId}  for team ${p.team?.name} (--team ${p.teamId})` +
-          `  from ${senderLabel(p)}  key ${p.fingerprint || 'none on file'}` +
+          `  from ${senderLabel(p)}  key ${keyOf(p)}` +
           (p.provisioned ? '' : '  [you do not hold this team key yet]')
       );
     }
@@ -409,8 +411,8 @@ async function cmdVaults() {
 
 async function cmdCreate({ positionals: [name] }) {
   const client = connect();
-  const { privateKey } = await unlock(client);
-  const safe = await createVault(client, privateKey, name);
+  const trust = await unlock(client);
+  const safe = await createVault(client, trust, name);
   note(`Created vault "${safe.name}". Use it in a project: sharedenv link ${safe._id}`);
   say(String(safe._id));
 }
@@ -490,6 +492,12 @@ async function cmdShow({ values }) {
         'in the web app, nothing new can be written to it.'
     );
   }
+  if (rotationUnfinished(vault)) {
+    note(
+      'A key rotation of this vault did not finish: until an admin finishes it in the web app, ' +
+        'nothing new can be written to it.'
+    );
+  }
 }
 
 // ── Commands: keys ──────────────────────────────────────────────────────────────────
@@ -497,8 +505,7 @@ async function cmdShow({ values }) {
 async function cmdGet({ values, positionals: [key] }) {
   const client = connect();
   const safeId = await targetVault(client, values);
-  const { privateKey } = await unlock(client);
-  const { safe, value } = await readSecret(client, privateKey, safeId, key);
+  const { safe, value } = await readSecret(client, await unlock(client), safeId, key);
   using(safe);
   // Nothing added to the value in a pipe or a file; a newline for the terminal's prompt.
   process.stdout.write(process.stdout.isTTY ? `${value}\n` : value);
@@ -512,8 +519,10 @@ function parseAssignments(args) {
   for (const arg of args) {
     const eq = arg.indexOf('=');
     const key = eq < 0 ? arg : arg.slice(0, eq);
-    if (!SECRET_NAME.test(key)) {
-      throw new UsageError(`"${key}" is not a key name: letters, digits, _ and - only`);
+    if (!WRITABLE_NAME.test(key)) {
+      throw new UsageError(
+        `"${key}" is not a key name: capital letters, digits, _ and -, 2 characters at least`
+      );
     }
     if (entries.some(([k]) => k === key) || bare === key) {
       throw new UsageError(`"${key}" is given twice`);
@@ -541,10 +550,10 @@ async function cmdSet({ values, positionals }) {
   const { entries, bare } = parseAssignments(positionals);
   const client = connect();
   const safeId = await targetVault(client, values);
-  const { privateKey } = await unlock(client);
+  using((await readVault(client, safeId)).safe); // before a value is asked, and anything written
+  const trust = await unlock(client);
   if (bare) entries.push([bare, await valueOf(bare)]);
-  const { safe, added, replaced } = await setSecrets(client, privateKey, safeId, entries);
-  using(safe);
+  const { added, replaced } = await setSecrets(client, trust, safeId, entries);
   note(
     [
       ...(added.length ? [`added ${added.join(', ')}`] : []),
@@ -565,8 +574,7 @@ async function cmdUnset({ values, positionals: keys }) {
 async function cmdRun({ values, command: [cmd, ...args] }) {
   const client = connect();
   const safeId = await targetVault(client, values);
-  const { privateKey } = await unlock(client);
-  const { safe: vault, secrets } = await pullSecrets(client, privateKey, safeId);
+  const { safe: vault, secrets } = await pullSecrets(client, await unlock(client), safeId);
   using(vault);
   const { safe, blocked, kept } = splitUnsafeEnv(secrets, {
     base: process.env,
@@ -594,8 +602,7 @@ async function cmdPull({ values }) {
   if (!render) throw new UsageError(`unknown format "${values.format}": dotenv or json`);
   const client = connect();
   const safeId = await targetVault(client, values);
-  const { privateKey } = await unlock(client);
-  const { safe, secrets } = await pullSecrets(client, privateKey, safeId);
+  const { safe, secrets } = await pullSecrets(client, await unlock(client), safeId);
   using(safe);
   const body = render(secrets);
   const text = body ? `${body}\n` : '';
@@ -619,16 +626,29 @@ async function cmdShare({ values, positionals: [email] }) {
   if (Boolean(email) === Boolean(values.team)) {
     throw new UsageError('share with a person (an email) or a team (--team <team>), one of them');
   }
+  if (values.team && (values.fingerprint || values['accept-key-change'])) {
+    throw new UsageError('--team: the key of a team is checked with --team-fingerprint');
+  }
+  if (email && values['team-fingerprint']) {
+    throw new UsageError('--team-fingerprint goes with --team');
+  }
   const level = levelOf(values);
   const client = connect();
   const safeId = await targetVault(client, values);
-  const { privateKey, watch } = await unlock(client);
-  const vault = await openVault(client, privateKey, safeId);
+  const trust = await unlock(client, values);
+  const vault = await openVaultToWrite(client, trust, safeId);
   using(vault.safe);
 
   if (values.team) {
     const team = await resolveTeam(client, values.team);
-    const status = await shareWithTeam(client, privateKey, vault, team, level);
+    const status = await shareWithTeam(client, trust, vault, team, level, {
+      check: namedKey(values['team-fingerprint']),
+    });
+    if (!status) {
+      note('Not shared.');
+      process.exitCode = 1;
+      return;
+    }
     note(
       `Shared with team ${teamLabel(team)} (${levelName(level)}).` +
         (status === 'pending' ? ' It waits for a lead of the team to accept it.' : '')
@@ -637,23 +657,25 @@ async function cmdShare({ values, positionals: [email] }) {
   }
 
   const person = await lookupPerson(client, email);
-  const who = person.username ? `${person.username} (${email})` : email;
-  await assertPersonLogged(client, { store, watch }, person, who);
-  note(`Sharing "${vault.safe.name}" with ${who}`);
-  const pins = store.readPins();
-  const ok = await vouchFor(
-    pins,
-    { subject: `user:${person.userId}`, publicKey: person.publicKey, who },
-    values,
-    { question: 'Seal this vault to this key?', changed: 'Seal it to their NEW key?' }
-  );
-  if (!ok) {
+  const who = person.username ? `${printable(person.username)} (${email})` : email;
+  note(`Sharing "${printable(vault.safe.name)}" with ${who}`);
+  const decision =
+    namedKey(values.fingerprint)(person.publicKey) &&
+    (await trust.sealTo({
+      person: {
+        subject: `user:${person.userId}`,
+        publicKey: person.publicKey,
+        label: who,
+        address: email,
+      },
+      context: { vault: printable(vault.safe.name), scripted: true },
+    }));
+  if (!decision) {
     note('Not shared.');
     process.exitCode = 1;
     return;
   }
-  store.writePins(pins);
-  const status = await shareWithPerson(client, privateKey, vault, person, level);
+  const status = await shareWithPerson(client, trust, vault, person, level, decision.people);
   note(
     `Shared with ${who} (${levelName(level)}).` +
       (status === 'pending' ? ' It waits for their answer: sharedenv accept, on their side.' : '')
@@ -663,13 +685,13 @@ async function cmdShare({ values, positionals: [email] }) {
 async function cmdAccept({ values, positionals: [ref] }) {
   const client = connect();
   const { safeId, teamId } = await resolvePendingShare(client, ref, values.team);
-  const { privateKey, watch } = await unlock(client);
-  const confirmIt = confirmShare(values);
-  const log = { store, watch };
+  const trust = await unlock(client, values);
+  const check = namedKey(values.fingerprint);
   const result = teamId
-    ? await acceptTeamShare(client, privateKey, teamId, safeId, { confirm: confirmIt, log })
-    : await acceptShare(client, privateKey, safeId, { confirm: confirmIt, log });
+    ? await acceptTeamShare(client, trust, teamId, safeId, { check })
+    : await acceptShare(client, trust, safeId, { check });
   note(result.accepted ? 'Accepted.' : 'Left pending.');
+  if (!result.accepted) process.exitCode = 1;
 }
 
 async function cmdDecline({ values, positionals: [ref] }) {
@@ -707,16 +729,28 @@ async function cmdTeams() {
 // ── Commands: trust ─────────────────────────────────────────────────────────────────
 
 // Derived from YOUR private key, never the server's copy: the value a teammate checks a
-// key against must not be one the server chose.
-async function cmdFingerprint() {
-  const { privateKey } = await unlock(connect());
-  say(fingerprintOf(publicKeyOf(privateKey)));
+// key against must not be one the server chose. The six words for a person, on stderr; the hex
+// on stdout, for a script.
+async function cmdFingerprint({ values }) {
+  const client = connect();
+  const trust = await unlock(client);
+  let key = publicKeyOf(trust.privateKey);
+  if (values.team) {
+    const team = await resolveTeam(client, values.team);
+    note(`sharedenv: team ${teamLabel(team)} (${team._id})`);
+    key = await teamKeyToCompare(client, trust, team);
+  }
+  note(fingerprintWords(key));
+  say(fingerprintOf(key));
 }
 
 // What the public key log check found on this machine and nobody acknowledged yet. Read
 // from what is kept, without the network: the warnings are the data (stdout).
 function cmdLog({ values }) {
-  const alerts = values.ack ? acknowledgeAlerts(store) : keptAlerts(store);
+  const session = store.readSession();
+  if (!session?.baseUrl) throw new Error('not signed in — run `sharedenv login`');
+  const kept = session.userId && store.forAccount(session.baseUrl, session.userId);
+  const alerts = !kept ? [] : values.ack ? acknowledgeAlerts(kept) : keptAlerts(kept);
   if (alerts.length === 0) {
     note('No warning from the public key log on this machine.');
     return;
@@ -741,6 +775,10 @@ const TRUST_OPTIONS = {
 
 const VAULT_DETAIL =
   'The vault: -v <name or id>, or the one this project is linked to (sharedenv link).';
+
+const SEALER_DETAIL =
+  'A key to the vault sealed by someone unknown here is shown and asked about, once. Without\n' +
+  'a terminal it is refused, unless SHAREDENV_TRUSTED_SEALERS lists its fingerprint.';
 
 const COMMANDS = {
   login: {
@@ -808,7 +846,7 @@ const COMMANDS = {
     usage: 'get <KEY> [-v <vault>]',
     summary: 'Print the value of one key',
     details:
-      `${VAULT_DETAIL}\n` +
+      `${VAULT_DETAIL}\n${SEALER_DETAIL}\n` +
       'The value is printed as is: nothing added in a pipe or a file, a newline in a terminal.',
     options: VAULT_OPTION,
     positionals: [1, 1],
@@ -819,7 +857,7 @@ const COMMANDS = {
     usage: 'set <KEY>=<value>... [<KEY>] [-v <vault>]',
     summary: 'Add or replace keys',
     details:
-      `${VAULT_DETAIL}\n` +
+      `${VAULT_DETAIL}\n${SEALER_DETAIL}\n` +
       'A <KEY> given without a value has its value asked without echo, or read from stdin\n' +
       '(`sharedenv set TLS_CERT < cert.pem`): it lands neither in your shell history nor in\n' +
       'the process list. Values are encrypted here before they leave.',
@@ -841,7 +879,7 @@ const COMMANDS = {
     usage: 'run [-v <vault>] [--allow-unsafe-env] [--override-env] -- <command> [args...]',
     summary: 'Run a command with the keys in its environment',
     details:
-      `${VAULT_DETAIL}\n` +
+      `${VAULT_DETAIL}\n${SEALER_DETAIL}\n` +
       'The secrets reach the command in memory, never on disk. Held back unless asked:\n' +
       'variables that make the command run code or redirect its traffic (LD_*, PATH,\n' +
       'NODE_OPTIONS, *_PROXY...: --allow-unsafe-env), and variables your environment\n' +
@@ -860,7 +898,7 @@ const COMMANDS = {
     usage: 'pull [-v <vault>] [--out <file>] [--format dotenv|json]',
     summary: 'Print or write every key, as a .env or JSON',
     details:
-      `${VAULT_DETAIL}\n` +
+      `${VAULT_DETAIL}\n${SEALER_DETAIL}\n` +
       '--out writes the file readable by you only. A dotenv file is safe to source in a\n' +
       'shell: values are quoted so that none is expanded.',
     options: {
@@ -875,19 +913,23 @@ const COMMANDS = {
     group: 'Sharing',
     usage:
       'share <email> | --team <team>  [--read|--write|--admin] [-v <vault>]\n' +
-      '                 [--yes] [--fingerprint <fp>] [--accept-key-change]',
+      '                 [--yes] [--fingerprint <fp>] [--accept-key-change] [--team-fingerprint <fp>]',
     summary: 'Share the vault with a person or one of your teams',
     details:
-      `${VAULT_DETAIL}\n` +
+      `${VAULT_DETAIL}\n${SEALER_DETAIL}\n` +
       'Read access unless --write or --admin. A person: their key fingerprint is shown and\n' +
-      'asked about, as for accept (compare it with them; --yes, --fingerprint and\n' +
-      '--accept-key-change answer for a script); the share then waits for their answer.\n' +
-      '--team: a team you are a member of (name or id, see `sharedenv teams`). Removing\n' +
-      "someone's access changes the vault's key: that is done in the web app.",
+      'asked about, as for accept (compare it with them). In a script, a key never seen here\n' +
+      'needs --fingerprint: --yes is not enough; --accept-key-change takes a key that differs\n' +
+      'from the one known here. The share then waits for their answer.\n' +
+      '--team: a team you are a member of (name or id, see `sharedenv teams`); if its key\n' +
+      'must be confirmed, only a human or --team-fingerprint can; a key someone who left still\n' +
+      "holds is asked about (--yes shares anyway). Removing someone's access changes the\n" +
+      "vault's key: that is done in the web app.",
     options: {
       ...VAULT_OPTION,
       ...TRUST_OPTIONS,
       team: { type: 'string' },
+      'team-fingerprint': { type: 'string' },
       read: { type: 'boolean' },
       write: { type: 'boolean' },
       admin: { type: 'boolean' },
@@ -903,7 +945,7 @@ const COMMANDS = {
     summary: 'Accept a share after checking who sealed it',
     details:
       "Shows the sender and their key's fingerprint, and asks. --yes: no question for a key\n" +
-      'that is new or already known here. --fingerprint: accept only if the key is this\n' +
+      'already known here, never for a new one. --fingerprint: accept only if the key is this\n' +
       'one. --accept-key-change: take a key that differs from the one known here. --team:\n' +
       'a share to a team you lead (name or id); if its key must be confirmed, only a human\n' +
       'or --team-fingerprint can.',
@@ -930,9 +972,13 @@ const COMMANDS = {
   },
   fingerprint: {
     group: 'Trust',
-    usage: 'fingerprint',
-    summary: 'Your public-key fingerprint, to read to a teammate',
-    options: {},
+    usage: 'fingerprint [--team <team>]',
+    summary: 'Your public-key fingerprint, or a team key you hold, to read to a teammate',
+    details:
+      'Six words to read aloud, on stderr, and the hexadecimal on stdout: --fingerprint,\n' +
+      '--team-fingerprint and SHAREDENV_TRUSTED_SEALERS take either. --team: a team you are a member\n' +
+      'of (name or id), from the key sealed to you, never from what the server says of it.',
+    options: { team: { type: 'string' } },
     positionals: [0, 0],
     run: cmdFingerprint,
   },
@@ -972,11 +1018,13 @@ A command works on the vault named by -v <name or id>, or on the one the current
 directory is linked to (sharedenv link). Run \`sharedenv help <command>\` for its options.
 
 Environment:
-  SHAREDENV_API         API URL (default ${DEFAULT_API})
-  SHAREDENV_IDENTIFIER  email or username, for a login without questions
-  SHAREDENV_PASSWORD    master password, for commands without questions
-  SHAREDENV_OTP         second-factor code, for a login without questions
-  SHAREDENV_HOME        where the session and the pinned keys live (default ~/.sharedenv)`;
+  SHAREDENV_API              API URL (default ${DEFAULT_API})
+  SHAREDENV_IDENTIFIER       email or username, for a login without questions
+  SHAREDENV_PASSWORD         master password, for commands without questions
+  SHAREDENV_OTP              second-factor code, for a login without questions
+  SHAREDENV_TRUSTED_SEALERS  fingerprints allowed to have sealed a vault's key, comma separated
+  SHAREDENV_HOME             where the session and what this machine learned about keys live
+                             (default ~/.sharedenv)`;
 
 function commandHelp(name) {
   const command = COMMANDS[name];

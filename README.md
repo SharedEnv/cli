@@ -216,11 +216,22 @@ sharedenv share --team backend               # a team you are a member of
 sharedenv teams                              # your organizations and their teams
 ```
 
-Sharing with a person shows the fingerprint of their key: compare it with them over another
-channel (a call, a chat) before you say yes, they read theirs with `sharedenv fingerprint`.
-The share then waits for their answer. Removing someone's access means changing the vault's
-key and re-encrypting every secret: that is done in the web app, as is managing teams and
-organizations.
+Sharing with a person shows the fingerprint of their key, six words to read aloud and the
+hexadecimal: compare it with them over another channel (a call, a chat) before you say yes,
+they read theirs with `sharedenv fingerprint`. The key of a team reads the same way:
+`sharedenv fingerprint --team backend`. The share then waits for their answer. Removing
+someone's access means changing the vault's key and re-encrypting every secret: that is done
+in the web app, as is managing teams and organizations.
+
+In a script, a key this machine has never seen needs its fingerprint: `--yes` is not enough,
+it only answers for a key already known here and for the other questions.
+
+```bash
+sharedenv share alice@example.com --fingerprint "$ALICE_FINGERPRINT"
+```
+
+The fingerprint is given in either form: the six words read aloud, with or without the `·`,
+or the hexadecimal.
 
 ### Accept what your team shares with you
 
@@ -289,6 +300,17 @@ Good practice for pipelines:
 - **Prefer `run` to `pull`**, and never print a `pull` to the job log.
 - **A second factor needs a code at login** (`SHAREDENV_OTP`), which a pipeline cannot
   produce on its own: keep the CI account without one, and limited as above.
+- **List who may seal the vault's key.** A pipeline cannot answer a question, and its
+  machine usually knows no key: a vault shared with the CI account is refused until
+  `SHAREDENV_TRUSTED_SEALERS` lists the fingerprint of whoever sealed it, as they read it
+  with `sharedenv fingerprint` (several: separated by commas). When another admin changes
+  the vault's key, the job stops until their fingerprint is added.
+- **A share or an accept names the fingerprint.** On a key this machine has never seen, a job
+  passes `--fingerprint "$THEIR_FINGERPRINT"`, checked once by a person and kept in a CI
+  variable: the first trust comes from someone, as with SSH's `known_hosts`. Without it the
+  job stops, with the message and the fingerprint, and nothing is sealed.
+- **Client version.** Each request names the CLI's version: below the version the server
+  accepts, a command stops and says how to update.
 
 ## How your secrets stay yours
 
@@ -300,10 +322,23 @@ Good practice for pipelines:
 - **You know who shares with you, and whom you share with.** A share opens only if it was
   sealed by its sender, and the CLI remembers the keys it has seen: if someone's key ever
   changes, it stops and asks.
+- **A vault is sealed to a team's real key.** `share --team` uses the key you hold for the
+  team, once it is the last one the public log holds for it, and sealed by you, known on
+  this machine, or confirmed by its fingerprint (`--team-fingerprint`, for a script). If
+  someone who left the team still holds that key, `share --team` says so and asks (`--yes`
+  for a script): the vault key stays theirs to read even after the team key is replaced.
+- **A vault key sealed by a stranger is not used.** Any key can seal a vault key of its
+  choosing to yours. Before using a vault's key, the CLI checks who sealed it: you, or
+  someone you accepted for this vault. A yes holds for that vault only, even for someone
+  known elsewhere. A new key must be the last one the public log holds for that person, and
+  is shown with its fingerprint: you say yes once, or nothing is read or written.
+- **A vault key cannot go back.** What is sealed names its vault and its version, and this
+  machine remembers the version it saw: an older one, or another key at that version, is
+  refused.
 - **A key cannot be swapped in our database without a trace.** Every public key the server
   hands out is first written to a log that only grows, each entry chained to the previous
-  one by its hash. The CLI seals to a key, or trusts its seal, only if it is the last one
-  logged for its owner; it warns you when a key that is not yours is logged under your
+  one by its hash. The CLI seals to a key, or starts trusting its seal, only if it is the last
+  one logged for its owner; it warns you when a key that is not yours is logged under your
   name, or under the name of a team whose key you hold, and refuses a log that rewrites
   what it already checked. A warning is repeated at every unlock until you acknowledge it
   with `sharedenv log --ack`.
@@ -322,8 +357,20 @@ What it does not protect against, said plainly:
   log a key of their own: the log keeps the trace, and its owner is warned the next time
   they unlock. Someone who controls our servers themselves could show you a different log.
   Comparing fingerprints once with someone settles it for good.
-- **After you accept a share**, its sender is not checked again; and an older value of the
-  same secret could be served back to you.
+- **A yes without comparing.** The CLI shows a new sealer's fingerprint, comparing it is up
+  to you. Until you do, someone who can write to our database and logs a key of their own
+  under a new account is only a name you do not know.
+- **Replays, on a machine that never saw the vault.** With no memory of it, an older vault
+  key sealed by someone you accept, or an older value of the same secret, could be served
+  back to you. `set` and `share` refuse a key rotation that did not finish, and a key that
+  does not open the vault's secrets; a value marked as set aside by a rotation does not count.
+- **A new machine knows nothing.** Until it has seen a vault, the CLI cannot tell a key put back in our database from the real one, and a swap in the log of a team it never saw raises no alarm. Where a key looks unsafe and only an admin can renew it, the CLI never asks: it says so and sends you to the web app.
+- **Someone who writes to our database can block you**, by putting a vault ahead of its key or marking its lines unreadable, without reading anything. The CLI then refuses to write and says why.
+- **A key replaced by its owner** stays good only for the vaults and versions this machine
+  already saw from it, so that they keep opening. If they replaced it because it leaked, ask
+  an admin to change the key of those vaults.
+- **Renewing a key is done in the web app.** The CLI never changes a vault's key: where only
+  that would help, it says so and sends you there.
 - **Your own account on your own machine.** The session file (`~/.sharedenv/session.json`,
   readable by you only) lets a program running as you act as you: sign out on machines you
   do not trust.
@@ -348,24 +395,25 @@ What it does not protect against, said plainly:
 | `sharedenv accept <vault> [--team <team>]`              | Accept a share after checking who sealed it.                |
 | `sharedenv decline <vault> [--team <team>]`             | Decline a share.                                            |
 | `sharedenv teams`                                       | Your organizations and their teams.                         |
-| `sharedenv fingerprint`                                 | Your key fingerprint, to read to a teammate.                |
+| `sharedenv fingerprint [--team <team>]`                 | Your key fingerprint, or a team's, to read to a teammate.   |
 | `sharedenv log [--ack]`                                 | The public key log warnings kept here, or acknowledge them. |
 
 Commands that work on a vault take `-v <name or id>`, or use the vault the current
 directory is linked to. `sharedenv help <command>` lists every option.
 
-| Environment variable   | Use                                                     |
-| ---------------------- | ------------------------------------------------------- |
-| `SHAREDENV_IDENTIFIER` | Email or username, for a login without questions.       |
-| `SHAREDENV_PASSWORD`   | Master password, for commands without questions.        |
-| `SHAREDENV_OTP`        | Two-factor code, for a login without questions.         |
-| `SHAREDENV_API`        | API URL (default `https://api.sharedenv.com`).          |
-| `SHAREDENV_HOME`       | Where the CLI keeps its files (default `~/.sharedenv`). |
+| Environment variable        | Use                                                                 |
+| --------------------------- | ------------------------------------------------------------------- |
+| `SHAREDENV_IDENTIFIER`      | Email or username, for a login without questions.                   |
+| `SHAREDENV_PASSWORD`        | Master password, for commands without questions.                    |
+| `SHAREDENV_OTP`             | Two-factor code, for a login without questions.                     |
+| `SHAREDENV_TRUSTED_SEALERS` | Fingerprints allowed to have sealed a vault's key, comma separated. A team key they sealed also counts as vouched for when the public key log is watched. |
+| `SHAREDENV_API`             | API URL (default `https://api.sharedenv.com`).                      |
+| `SHAREDENV_HOME`            | Where the CLI keeps its files (default `~/.sharedenv`).             |
 
-The CLI keeps three files there, all readable by you only: `session.json` (your session),
-`pins.json` (the public keys this machine has checked) and `log.json` (how far it checked
-the public key log, and the warnings not acknowledged yet). Never a secret, never your
-password, never your private key.
+The CLI keeps there, all readable by you only: `session.json` (your session), and one
+`servers/<server>/<account>/memory.json` per server and account (the keys this machine has
+checked, which vaults and versions it saw, how far it checked the public key log, the warnings
+not acknowledged yet). Never a secret, never your password, never your private key.
 
 Exit codes: `0` success, `1` error, `2` wrong usage (an ambiguous vault name included),
 `130` cancelled. With `run`: the command's own code, `128 + n` when signal `n` ended it,
