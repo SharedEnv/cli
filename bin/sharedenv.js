@@ -337,7 +337,18 @@ async function cmdLogin({ values }) {
   // for this machine instead of keeping a second one alive.
   const cookies = previous?.baseUrl === baseUrl ? previous.cookies : {};
   const client = createClient({ baseUrl, cookies, userAgent: USER_AGENT });
-  const otp = async () => process.env.SHAREDENV_OTP || (await ask('Two-factor code: '));
+  const otp =
+    process.env.SHAREDENV_OTP ||
+    (async ({ sent, channel, hint, refused }) => {
+      if (sent) {
+        note(
+          `A code was sent by ${channel === 'sms' ? 'text message' : 'email'}${hint ? ` to ${hint}` : ''}.`
+        );
+      } else if (refused) {
+        note(`No code could be sent (${refused}). An authenticator or recovery code still works.`);
+      }
+      return ask('Two-factor code: ');
+    });
   await login(client, { identifier, password, otp });
   // The vault opens: only then is anything kept. The server just accepted this password,
   // so a vault it does not open was sealed under the one before a reset.
